@@ -1,4 +1,6 @@
 # frozen_string_literal: true
+#
+require 'stringio'
 
 require "did_you_do/version"
 
