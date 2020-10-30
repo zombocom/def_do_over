@@ -288,16 +288,22 @@ RSpec.describe DidYouDo do
        begon
          Foo.call
        rescue
+          # stuff
+          # here
+          # but its fine
        end
       EOM
       SuggestSyntax.new(source, io: io).call
+
+      puts io.string
 
       expect(io.string).to eq(<<~EOM)
         Array(value).each |x| #{CodeNode::SYNTAX_SUGGESTION}
         end
 
-        begin
-        rescue #{CodeNode::SYNTAX_SUGGESTION}
+        begon #{CodeNode::SYNTAX_SUGGESTION}
+        rescue
+          #{CodeNode::OMITTED}
         end
       EOM
     end
