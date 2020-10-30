@@ -1,5 +1,7 @@
 require "bundler/setup"
 require "did_you_do"
+require "pathname"
+require "tmpdir"
 
 RSpec.configure do |config|
   # Enable flags like --only-failures and --next-failure
@@ -11,4 +13,16 @@ RSpec.configure do |config|
   config.expect_with :rspec do |c|
     c.syntax = :expect
   end
+end
+
+def spec_dir
+  Pathname(__dir__)
+end
+
+def root_dir
+  spec_dir.join("..")
+end
+
+def lib_dir
+  root_dir.join("lib")
 end
