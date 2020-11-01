@@ -277,36 +277,36 @@ RSpec.describe DidYouDo do
   end
 
   describe "suggest syntax" do
-    it "suggests syntax" do
-      io = StringIO.new
-      source = <<~EOM
-       Array(value).each |x|
-       end
+    #it "suggests syntax" do
+    #  io = StringIO.new
+    #  source = <<~EOM
+    #   Array(value).each |x|
+    #   end
 
-       # I'm fine
+    #   # I'm fine
 
-       begon
-         Foo.call
-       rescue
-          # stuff
-          # here
-          # but its fine
-       end
-      EOM
-      SuggestSyntax.new(source, io: io).call
+    #   begon
+    #     Foo.call
+    #   rescue
+    #      # stuff
+    #      # here
+    #      # but its fine
+    #   end
+    #  EOM
+    #  SuggestSyntax.new(source, io: io).call
 
-      puts io.string
+    #  puts io.string
 
-      expect(io.string).to eq(<<~EOM)
-        Array(value).each |x| #{CodeNode::SYNTAX_SUGGESTION}
-        end
+    #  expect(io.string).to eq(<<~EOM)
+    #    Array(value).each |x| #{CodeNode::SYNTAX_SUGGESTION}
+    #    end
 
-        begon #{CodeNode::SYNTAX_SUGGESTION}
-        rescue
-          #{CodeNode::OMITTED}
-        end
-      EOM
-    end
+    #    begon #{CodeNode::SYNTAX_SUGGESTION}
+    #    rescue
+    #      #{CodeNode::OMITTED}
+    #    end
+    #  EOM
+    #end
 
   end
 
@@ -439,5 +439,154 @@ RSpec.describe DidYouDo do
         EOM
       ).to be_falsey
     end
+  end
+end
+
+class CodeSource
+  attr_reader :lines, :indent_array, :indent_hash, :code_lines
+
+  def initialize(source)
+    @lines = source.lines
+    @indent_array = []
+    @indent_hash = Hash.new {|h, k| h[k] = [] }
+
+    @code_lines = []
+    lines.each_with_index do |line, i|
+      code_line = CodeLine.new(
+        line: line,
+        index: i,
+        source: self
+      )
+
+      @indent_array[i] = code_line.indent
+      @indent_hash[code_line.indent] << i
+      @code_lines << code_line
+    end
+  end
+end
+
+class CodeLine
+  attr_reader :line, :index, :indent
+
+  def initialize(line: , index:, source: )
+    @line = line
+    @stripped_line = line.strip
+    @index = index
+    @indent = SpaceCount.indent(line)
+    @source = source
+    @is_end = line.strip == "end".freeze
+  end
+
+  def line_number
+    index + 1
+  end
+
+  def empty?
+    @stripped_line.empty?
+  end
+
+  def to_s
+    @line
+  end
+
+  def previous
+    @source.code_lines[index - 1]
+  end
+
+  def next
+    @source.code_lines[index - 1]
+  end
+
+  def is_end?
+    @is_end
+  end
+end
+
+class EndCodeBlock
+  attr_reader :indent_levels
+
+  def initialize(code_lines:)
+    @code_lines = code_lines
+    @end_indent_hash = Hash.new {|h,k| h[k] = [] }
+    @code_lines.each do |line|
+      @end_indent_hash[line.indent] << line unless line.empty?
+    end
+
+    @indent_levels = @end_indent_hash.keys.sort
+  end
+
+  def this_level
+  end
+end
+
+# We basically want to make sure all lines are marked as either being invalid
+# and if that's the case we want to associate them with their smalles group possible
+# or we want to mark lines as valid.
+#
+# If a line is is a part of a valid group, then it's contents can be replaced with a comment
+#
+# Start at the furthest indentation, scan up and down until indentation decreases and check parsing, mark
+# if valid, mark and remove, stop that search. Otherwise drop to the next lower indentation level.
+#
+# Check if that indentation level parses by itself, then check if all of it parses. Any time a line parses
+# successfully, mark it and remove it.
+#
+
+# @foo = <<~EOM
+#   def foo
+#     puts 'lol
+#       '
+#   end
+# EOM
+
+# @foo = <<~EOM
+# beginn # Outer error here
+#   foo # Inner error here
+#   end
+# rescue
+#   # good code
+# end
+
+# def flerg
+
+# end
+# EOM
+
+
+RSpec.describe CodeLine do
+  it "flerb" do
+    source = CodeSource.new(<<~EOM)
+      def foo
+        puts 'lol'
+      end
+    EOM
+    block = EndCodeBlock.new(code_lines: source.code_lines)
+    expect(block.indent_levels).to eq([0, 2])
+  end
+
+  it "empty code line" do
+    source = CodeSource.new(<<~EOM)
+      # Not empty
+
+      # Not empty
+    EOM
+
+    expect(source.code_lines.map(&:empty?)).to eq([false, true, false])
+  end
+
+  it "blerg" do
+    source = CodeSource.new(<<~EOM)
+      def foo
+        puts 'lol'
+      end
+    EOM
+
+    expect(source.indent_array).to eq([0, 2, 0])
+    expect(source.indent_hash).to eq({0 =>[0, 2], 2 =>[1]})
+    expect(source.code_lines.join()).to eq(<<~EOM)
+      def foo
+        puts 'lol'
+      end
+    EOM
   end
 end
