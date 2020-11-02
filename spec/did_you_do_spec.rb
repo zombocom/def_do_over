@@ -38,7 +38,7 @@ RSpec.describe DidYouDo do
 
   module SpaceCount
     def self.indent(string)
-      string.split(/\w/).first.length
+      string.split(/\w/).first&.length || 0
     end
   end
 
@@ -446,6 +446,7 @@ class CodeSource
   attr_reader :lines, :indent_array, :indent_hash, :code_lines
 
   def initialize(source)
+    @frontier = []
     @lines = source.lines
     @indent_array = []
     @indent_hash = Hash.new {|h, k| h[k] = [] }
@@ -455,7 +456,6 @@ class CodeSource
       code_line = CodeLine.new(
         line: line,
         index: i,
-        source: self
       )
 
       @indent_array[i] = code_line.indent
@@ -463,22 +463,141 @@ class CodeSource
       @code_lines << code_line
     end
   end
+
+  def largest_indent
+    @indent_hash.keys.sort.last
+  end
+
+  def indent_hash
+    @indent_hash
+  end
+
+  def self.code_lines_to_source(source)
+    source = source.select(&:visible?)
+    source = source.join($/)
+  end
+
+  def self.valid?(source)
+    source = code_lines_to_source(source) if source.is_a?(Array)
+    source = source.to_s
+
+    # Parser writes to stderr even if you catch the error
+    #
+    stderr = $stderr
+    $stderr = StringIO.new
+
+    Parser::CurrentRuby.parse(source)
+    true
+  rescue Parser::SyntaxError
+    false
+  ensure
+    $stderr = stderr if stderr
+  end
+
+# def next_frontier
+  #   return @frontier.sort(&:max_indent).pop if @frontier.any?
+
+  #   indent = self.largest_indent
+  #   if (line = @indent_hash[indent].pop)
+  #     block = CodeBlock.new(
+  #       source: source,
+  #       lines: line
+  #     ).block_with_neighbors_while do |l|
+  #       l.indent == line.indent
+  #     end
+
+  #     @indent_hash[indent] -= block.lines
+  #     @indent_hash.delete(indent) if @indent_hash[indent].empty?
+  #   end
+  # end
+
+  # def detect_invalid
+  #   while block = next_frontier
+  #     if frontier.empty?
+  #       line = @indent_hash[indent].pop
+  #       block = CodeBlock.new(
+  #         source: source,
+  #         lines: line
+  #       ).block_with_neighbors_while do |l|
+  #         l.indent == line.indent
+  #       end
+
+  #       @indent_hash[indent] -= block.lines
+  #     else
+  #       block = frontier.sort(&:max_indent).pop # Look at highest
+  #     end
+
+  #     if block.valid?
+  #       # Valid lines can be ignored, keep searching
+  #       block.lines.each(&:mark_invisible)
+  #     else
+  #       if block.document_valid_without?
+  #         block.lines.each(&:mark_invalid)
+
+  #         # Mark invalid
+  #         # return globally invalid
+  #         return
+  #       else
+  #         next_indent = block.closest_inden
+  #         frontier << block.block_with_neighbors_while do |l|
+  #           l.indent = next_indent
+  #         end
+  #       end
+  #     end
+  #   end
+  # end
+end
+
+class DetectInvalid
+  def initialize
+    @source = source
+  end
+
+  def call
+  end
 end
 
 class CodeLine
   attr_reader :line, :index, :indent
 
-  def initialize(line: , index:, source: )
+  VALID_STATUS = [:valid, :invalid, :unknown].freeze
+
+  def initialize(line: , index:)
     @line = line
     @stripped_line = line.strip
     @index = index
     @indent = SpaceCount.indent(line)
-    @source = source
     @is_end = line.strip == "end".freeze
+    @status = nil # valid, invalid, unknown
+    @visible = true
+  end
+
+  def mark_valid
+    @status = :valid
+  end
+
+  def mark_invalid
+    @status = :invalid
+  end
+
+  def mark_invisible
+    @visible = false
+  end
+
+  def mark_visible
+    @visible = true
+  end
+
+  def visible?
+    @visible
   end
 
   def line_number
     index + 1
+  end
+
+  def not_empty?
+    !empty?
   end
 
   def empty?
@@ -489,80 +608,220 @@ class CodeLine
     @line
   end
 
-  def previous
-    @source.code_lines[index - 1]
-  end
-
-  def next
-    @source.code_lines[index - 1]
-  end
-
   def is_end?
     @is_end
   end
 end
 
-class EndCodeBlock
-  attr_reader :indent_levels
 
-  def initialize(code_lines:)
-    @code_lines = code_lines
-    @end_indent_hash = Hash.new {|h,k| h[k] = [] }
-    @code_lines.each do |line|
-      @end_indent_hash[line.indent] << line unless line.empty?
-    end
+class CodeBlock
+  attr_reader :lines
 
-    @indent_levels = @end_indent_hash.keys.sort
+  def initialize(source: , lines: [])
+    @lines = Array(lines)
+    @source = source
   end
 
-  def this_level
+  def max_indent
+    @lines.map(&:indent).max
+  end
+
+  def block_with_neighbors_while
+    array = []
+    array << before_lines.take_while do |line|
+      yield line
+    end
+    array << lines
+
+    array << after_lines.take_while do |line|
+      yield line
+    end
+
+    CodeBlock.new(
+      source: @source,
+      lines: array.flatten
+    )
+  end
+
+  def closest_indent
+    [before_line.indent, after_line.indent].max
+  end
+
+  def before_line
+    before_lines.first
+  end
+
+  def after_line
+    after_lines.first
+  end
+
+  def before_lines
+    index = @lines.first.index - 1
+    @source.code_lines[index..0]
+      .select(&:not_empty?)
+      .select(&:visible?)
+      .reverse
+  end
+
+  def after_lines
+    index = @lines.last.index + 1
+    @source.code_lines[index..-1]
+      .select(&:not_empty?)
+      .select(&:visible?)
+  end
+
+  # Returns a code block of the source that does not include
+  # the current lines. This is useful for checking if a source
+  # with the given lines removed parses successfully. If so
+  #
+  # Then it's proof that the current block is invalid
+  def block_without
+    @block_without ||= CodeBlock.new(
+      source: @source,
+      lines: @source.code_lines - @lines
+    )
+  end
+
+  def document_valid_without?
+    block_without.valid?
+  end
+
+  def valid?
+    CodeSource.valid?(self.to_s)
+  end
+
+  def to_s
+    CodeSource.code_lines_to_source(@lines)
   end
 end
 
-# We basically want to make sure all lines are marked as either being invalid
-# and if that's the case we want to associate them with their smalles group possible
-# or we want to mark lines as valid.
-#
-# If a line is is a part of a valid group, then it's contents can be replaced with a comment
-#
-# Start at the furthest indentation, scan up and down until indentation decreases and check parsing, mark
-# if valid, mark and remove, stop that search. Otherwise drop to the next lower indentation level.
-#
-# Check if that indentation level parses by itself, then check if all of it parses. Any time a line parses
-# successfully, mark it and remove it.
-#
-
-# @foo = <<~EOM
-#   def foo
-#     puts 'lol
-#       '
+# if frontier.empty?
+#   line = @indent_hash[indent].pop
+#   block = CodeBlock.new(
+#     source: source,
+#     lines: line
+#   ).block_with_neighbors_while do |l|
+#     l.indent == line.indent
 #   end
-# EOM
 
-# @foo = <<~EOM
-# beginn # Outer error here
-#   foo # Inner error here
-#   end
-# rescue
-#   # good code
+#   @indent_hash[indent] -= block.lines
+# else
+#   block = frontier.sort(&:max_indent).pop # Look at highest
 # end
 
-# def flerg
+# if block.valid?
+#   # Valid lines can be ignored, keep searching
+#   block.lines.each(&:mark_invisible)
+# else
+#   if block.document_valid_without?
+#     block.lines.each(&:mark_invalid)
 
+#     # Mark invalid
+#     # return globally invalid
+#     return
+#   else
+#     next_indent = block.closest_inden
+#     frontier << block.block_with_neighbors_while do |l|
+#       l.indent = next_indent
+#     end
+#   end
 # end
-# EOM
-
 
 RSpec.describe CodeLine do
-  it "flerb" do
+  it "code block can detect if it's valid or not" do
     source = CodeSource.new(<<~EOM)
       def foo
         puts 'lol'
       end
     EOM
-    block = EndCodeBlock.new(code_lines: source.code_lines)
-    expect(block.indent_levels).to eq([0, 2])
+
+    block = CodeBlock.new(source: source, lines: source.code_lines[1])
+    expect(block.valid?).to be_truthy
+    expect(block.document_valid_without?).to be_truthy
+    expect(block.block_without.lines).to eq([source.code_lines[0], source.code_lines[2]])
+    expect(block.max_indent).to eq(2)
+    expect(block.before_lines).to eq([source.code_lines[0]])
+    expect(block.after_lines).to eq([source.code_lines[2]])
+    expect(
+      block.block_with_neighbors_while {|n| n.indent == block.max_indent - 2}.lines
+    ).to eq(source.code_lines)
+
+    expect(
+      block.block_with_neighbors_while {|n| n.index == 1 }.lines
+    ).to eq([source.code_lines[1]])
+
+
+#   block = CodeBlock.new(
+#     source: source,
+#     lines: line
+#   ).block_with_neighbors_while do |l|
+#     l.indent == line.indent
+#   end
+
+    source = CodeSource.new(<<~EOM)
+      def foo
+        bar; end
+      end
+    EOM
+
+    block = CodeBlock.new(source: source, lines: source.code_lines[1])
+    expect(block.valid?).to be_falsey
+    expect(block.document_valid_without?).to be_truthy
+    expect(block.block_without.lines).to eq([source.code_lines[0], source.code_lines[2]])
+    expect(block.before_lines).to eq([source.code_lines[0]])
+    expect(block.after_lines).to eq([source.code_lines[2]])
   end
+
+  it "ignores marked valid lines" do
+    code_lines = []
+    code_lines << CodeLine.new(line: "def foo",            index: 0)
+    code_lines << CodeLine.new(line: "  Array(value) |x|", index: 1)
+    code_lines << CodeLine.new(line: "  end",              index: 2)
+    code_lines << CodeLine.new(line: "end",                index: 3)
+
+    expect(CodeSource.valid?(code_lines)).to be_falsey
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+      def foo
+        Array(value) |x|
+        end
+      end
+    EOM
+
+    code_lines[0].mark_invisible
+    code_lines[3].mark_invisible
+
+    expected = ["  Array(value) |x|", "  end"].join($/)
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(expected)
+
+    expect(CodeSource.valid?(code_lines)).to be_falsey
+  end
+
+  it "ignores marked invalid lines" do
+    code_lines = []
+    code_lines << CodeLine.new(line: "def foo",            index: 0)
+    code_lines << CodeLine.new(line: "  Array(value) |x|", index: 1)
+    code_lines << CodeLine.new(line: "  end",              index: 2)
+    code_lines << CodeLine.new(line: "end",                index: 3)
+
+    expect(CodeSource.valid?(code_lines)).to be_falsey
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+      def foo
+        Array(value) |x|
+        end
+      end
+    EOM
+
+    code_lines[1].mark_invisible
+    code_lines[2].mark_invisible
+
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+      def foo
+      end
+    EOM
+
+    expect(CodeSource.valid?(code_lines)).to be_truthy
+  end
+
 
   it "empty code line" do
     source = CodeSource.new(<<~EOM)
@@ -572,6 +831,7 @@ RSpec.describe CodeLine do
     EOM
 
     expect(source.code_lines.map(&:empty?)).to eq([false, true, false])
+    expect(source.code_lines.map {|l| CodeSource.valid?(l) }).to eq([true, true, true])
   end
 
   it "blerg" do
