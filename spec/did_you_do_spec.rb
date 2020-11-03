@@ -170,7 +170,7 @@ class CodeBlock
   end
 
   def expand_until_neighbors
-    expand_to_indent(lines.first.indent)
+    expand_to_indent(current_indent)
   end
 
   def expand_to_indent(indent)
@@ -208,6 +208,10 @@ class CodeBlock
 
   def next_indent
     [before_line&.indent || 0, after_line&.indent || 0].max
+  end
+
+  def current_indent
+    lines.detect(&:not_empty?)&.indent || 0
   end
 
   def before_line
