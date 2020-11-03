@@ -35,125 +35,6 @@ RSpec.describe DidYouDo do
       # puts out
     end
   end
-
-  #describe "integration" do
-  #  it "finds nested nodes" do
-
-  #    invalid_nodes = []
-  #    ParseEndZones.new(source).each do |zone|
-  #      CodeNode.new(
-  #        beginning: zone[:beginning],
-  #        middle: zone[:middle],
-  #        ending: zone[:ending],
-  #        invalid_nodes: invalid_nodes
-  #      ).call
-  #    end
-
-  #    expect(invalid_nodes.length).to eq(2)
-  #    expect(invalid_nodes.first.full_source).to include(%Q{describe "lol"})
-  #    expect(invalid_nodes.first.full_source).to eq(<<~EOM.strip)
-  #     describe "lol" #{CodeNode::SYNTAX_SUGGESTION}
-  #     end
-  #    EOM
-  #    expect(invalid_nodes.last.full_source).to include(%Q{  Foo.call})
-
-  #    expect(invalid_nodes.last.full_source).to eq(<<~EOM.strip)
-  #     describe "hi" do
-  #       Foo.call #{CodeNode::SYNTAX_SUGGESTION}
-  #       end
-  #     end
-  #    EOM
-  #  end
-  #end
-
-  #describe "code node" do
-  #  it "finds invalid sub nodes" do
-  #    invalid_nodes = []
-  #    node = CodeNode.new(
-  #      beginning: "def foo",
-  #      middle:    "  bar\n  end",
-  #      ending:    "end",
-  #      invalid_nodes: invalid_nodes,
-  #    )
-  #    node.call
-
-  #    expect(invalid_nodes.length).to eq(1)
-  #    expect(invalid_nodes.first).to_not eq(node)
-  #    expect(invalid_nodes.first.full_source).to eq(<<~EOM.strip)
-  #      def foo
-  #        bar #{CodeNode::SYNTAX_SUGGESTION}
-  #        end
-  #      end
-  #    EOM
-  #  end
-
-  #  it "likes valid code" do
-  #    invalid_nodes = []
-  #    node = CodeNode.new(
-  #      beginning: "def foo",
-  #      middle:    "  puts 'lol'",
-  #      ending:    "end",
-  #      invalid_nodes: invalid_nodes,
-  #    )
-  #    node.call
-
-  #    expect(invalid_nodes.length).to eq(0)
-  #  end
-
-  #  it "finds invalid empty code" do
-  #    invalid_nodes = []
-  #    node = CodeNode.new(
-  #      beginning: "defzfoo",
-  #      middle:    "  puts 'lol'",
-  #      ending:    "end",
-  #      invalid_nodes: invalid_nodes,
-  #    )
-  #    node.call
-
-  #    expect(invalid_nodes.length).to eq(1)
-  #    expect(invalid_nodes.first).to eq(node)
-  #    expect(invalid_nodes.first.full_source).to eq(<<~EOM.strip)
-  #      defzfoo #{CodeNode::SYNTAX_SUGGESTION}
-  #        #{CodeNode::OMITTED}
-  #      end
-  #    EOM
-  #  end
-
-  #  it "wraps code" do
-  #    node = CodeNode.new(
-  #      beginning: "def foo",
-  #      middle:    "  puts 'lol'",
-  #      ending:    "end"
-  #    )
-
-  #    expect(node.empty_source).to eq(<<~EOM.strip)
-  #      def foo
-  #      end
-  #    EOM
-
-  #    expect(node.full_source).to eq(<<~EOM.strip)
-  #      def foo
-  #        puts 'lol'
-  #      end
-  #    EOM
-  #  end
-
-  #  it "knows valid code" do
-  #    expect(
-  #      CodeNode.valid? <<~EOM
-  #        describe "foo" do
-  #        end
-  #      EOM
-  #    ).to be_truthy
-
-  #    expect(
-  #      CodeNode.valid? <<~EOM
-  #        describe "foo"
-  #        end
-  #      EOM
-  #    ).to be_falsey
-  #  end
-  #end
 end
 
 module SpaceCount
@@ -175,6 +56,15 @@ class CodeLine
     @is_end = line.strip == "end".freeze
     @status = nil # valid, invalid, unknown
     @visible = true
+    @block_memeber = nil
+  end
+
+  def belongs_to_block?
+    @block_member
+  end
+
+  def mark_block(code_block)
+    @block_member = code_block
   end
 
   def marked_invalid?
@@ -222,7 +112,6 @@ class CodeLine
   end
 end
 
-
 class CodeBlock
   attr_reader :lines
 
@@ -258,8 +147,60 @@ class CodeBlock
     )
   end
 
-  def closest_indent
-    [before_line.indent, after_line.indent].max
+  # We can guess a block boundry exists when there's
+  # a change in indentation (spaces decrease) or an empty line
+  #
+  # Expand on until boundry condition is met:
+  #
+  #   - Indentation goes down (do not add this line, stop search)
+  #   - empty line (add this line, stop search)
+  #
+  # Check valid/invalid
+
+  # Two cases:
+  #
+  #   - Search same indent
+  #   - Search smaller indent
+  #
+  # Take a line, find the nearest indent
+  #
+  # Pick a line, expand up until we've hit an empty
+  def expand_until_next_boundry
+    indent = next_indent
+    array = []
+    before_lines(skip_empty: false).each do |line|
+      if line.empty?
+        array.prepend(line)
+        break
+      end
+
+      if line.indent == indent
+        array.prepend(line)
+      else
+        break
+      end
+    end
+
+    array << @lines
+
+    after_lines(skip_empty: false).each do |line|
+      if line.empty?
+        array << line
+        break
+      end
+
+      if line.indent == indent
+        array << line
+      else
+        break
+      end
+    end
+
+    @lines = array.flatten
+  end
+
+  def next_indent
+    [before_line&.indent || 0, after_line&.indent || 0].max
   end
 
   def before_line
@@ -270,19 +211,22 @@ class CodeBlock
     after_lines.first
   end
 
-  def before_lines
-    index = @lines.first.index - 1
-    @source.code_lines[index..0]
-      .select(&:not_empty?)
-      .select(&:visible?)
-      .reverse
+  def before_lines(skip_empty: true)
+    index = @lines.first.index
+    lines = @source.code_lines.select {|line| line.index < index }
+    lines.select!(&:not_empty?) if skip_empty
+    lines.select!(&:visible?)
+    lines.reverse!
+
+    lines
   end
 
-  def after_lines
-    index = @lines.last.index + 1
-    @source.code_lines[index..-1]
-      .select(&:not_empty?)
-      .select(&:visible?)
+  def after_lines(skip_empty: true)
+    index = @lines.last.index
+    lines = @source.code_lines.select {|line| line.index > index }
+    lines.select!(&:not_empty?) if skip_empty
+    lines.select!(&:visible?)
+    lines
   end
 
   # Returns a code block of the source that does not include
@@ -416,6 +360,8 @@ class CodeSource
 
   def detect_invalid
     while block = next_frontier
+      block.lines.each { |line| line.mark_block(self) }
+
       if block.valid?
         block.lines.each(&:mark_valid)
         block.lines.each(&:mark_invisible)
@@ -427,9 +373,7 @@ class CodeSource
         return
       end
 
-      before_indent = before_line.indent
-      after_indent = after_line.indent
-      indent = [before_indent, after_indent].max
+      indent = block.next_indent
       @frontier << block.block_with_neighbors_while do |line|
         line.indent == indent
       end
@@ -523,7 +467,9 @@ RSpec.describe CodeLine do
     expect(block.block_without.lines).to eq([source.code_lines[0], source.code_lines[2]])
     expect(block.max_indent).to eq(2)
     expect(block.before_lines).to eq([source.code_lines[0]])
+    expect(block.before_line).to eq(source.code_lines[0])
     expect(block.after_lines).to eq([source.code_lines[2]])
+    expect(block.after_line).to eq(source.code_lines[2])
     expect(
       block.block_with_neighbors_while {|n| n.indent == block.max_indent - 2}.lines
     ).to eq(source.code_lines)
@@ -623,9 +569,27 @@ RSpec.describe CodeLine do
     EOM
   end
 
+  #      beginning: "defzfoo",
+  #      middle:    "  puts 'lol'",
+  #      ending:    "end",
 
   describe "detect cases" do
-    it "" do
+    it "finds one invalid code block with typo def" do
+      source_string = <<~EOM
+        defzfoo
+          puts "lol"
+        end
+      EOM
+      source = CodeSource.new(source_string)
+      source.detect_invalid
+
+      expect(source.invalid_code.to_s).to eq(<<~EOM)
+      defzfoo
+      end
+      EOM
+    end
+
+    it "finds one invalid code block with missing do at the depest indent" do
       source = <<~EOM
         describe "hi" do
           Foo.call
@@ -643,6 +607,80 @@ RSpec.describe CodeLine do
       expect(source.code_lines[2].marked_invalid?).to be_truthy
 
       expect(source.invalid_code.to_s).to eq("  Foo.call\n  end\n")
+    end
+
+
+    it "expand until next boundry (indentation)" do
+      source_string = <<~EOM
+        describe "what" do
+          Foo.call
+        end
+
+        describe "hi"
+          Bar.call do
+            Foo.call
+          end
+        end
+
+        it "blerg" do
+        end
+      EOM
+
+      source = CodeSource.new(source_string)
+      block = CodeBlock.new(
+        lines: source.code_lines[6],
+        source: source
+      )
+
+      block.expand_until_next_boundry
+      puts block.to_s
+
+      expect(block.to_s.strip).to include("Bar.call do")
+      expect(block.to_s.strip).to include("  Foo.call")
+      expect(block.to_s.strip).to include("end")
+    end
+
+
+
+    it "expand until next boundry (empty lines)" do
+      source_string = <<~EOM
+        describe "what" do
+        end
+
+        describe "hi"
+        end
+
+        it "blerg" do
+        end
+      EOM
+
+      source = CodeSource.new(source_string)
+      block = CodeBlock.new(
+        lines: source.code_lines[0],
+        source: source
+      )
+      block.expand_until_next_boundry
+
+      expect(block.to_s.strip).to eq(<<~EOM.strip)
+        describe "what" do
+        end
+      EOM
+
+      source = CodeSource.new(source_string)
+      block = CodeBlock.new(
+        lines: source.code_lines[3],
+        source: source
+      )
+      block.expand_until_next_boundry
+
+      expect(block.to_s.strip).to eq(<<~EOM.strip)
+        describe "hi"
+        end
+      EOM
+
+      block.expand_until_next_boundry
+
+      expect(block.to_s.strip).to eq(source_string.strip)
     end
   end
 end
