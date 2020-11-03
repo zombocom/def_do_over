@@ -166,7 +166,14 @@ class CodeBlock
   #
   # Pick a line, expand up until we've hit an empty
   def expand_until_next_boundry
-    indent = next_indent
+    expand_to_indent(next_indent)
+  end
+
+  def expand_until_neighbors
+    expand_to_indent(lines.first.indent)
+  end
+
+  def expand_to_indent(indent)
     array = []
     before_lines(skip_empty: false).each do |line|
       if line.empty?
@@ -320,18 +327,14 @@ class CodeSource
   # Returns a CodeBlock based on the maximum indentation
   # present in the source
   def max_indent_to_block
-    max_indent = get_max_indent
     if (line = pop_max_indent_line)
       block = CodeBlock.new(
         source: self,
         lines: line
-      ).block_with_neighbors_while do |line|
-        line.indent == max_indent
-      end
+      )
+      block.expand_until_neighbors
+      clean_hash(block)
 
-      block.lines.each do |line|
-        @indent_hash[line.indent].delete(line)
-      end
       return block
     end
   end
@@ -340,7 +343,7 @@ class CodeSource
   # frontier or if
   def next_frontier
     if @frontier.any?
-      block = @frontier.sort(&:max_indent).pop
+      block = @frontier.sort(&:next_indent).pop
 
       if block.max_indent <= self.max_indent
         @frontier.push(block)
@@ -349,6 +352,12 @@ class CodeSource
     end
 
     max_indent_to_block if block.nil?
+  end
+
+  def clean_hash(block)
+    block.lines.each do |line|
+      @indent_hash[line.indent].delete(line)
+    end
   end
 
   def invalid_code
@@ -360,8 +369,6 @@ class CodeSource
 
   def detect_invalid
     while block = next_frontier
-      block.lines.each { |line| line.mark_block(self) }
-
       if block.valid?
         block.lines.each(&:mark_valid)
         block.lines.each(&:mark_invisible)
@@ -373,10 +380,10 @@ class CodeSource
         return
       end
 
-      indent = block.next_indent
-      @frontier << block.block_with_neighbors_while do |line|
-        line.indent == indent
-      end
+      block.expand_until_next_boundry
+      clean_hash(block)
+
+      @frontier << block
     end
   end
 end
@@ -633,14 +640,25 @@ RSpec.describe CodeLine do
       )
 
       block.expand_until_next_boundry
-      puts block.to_s
 
-      expect(block.to_s.strip).to include("Bar.call do")
-      expect(block.to_s.strip).to include("  Foo.call")
-      expect(block.to_s.strip).to include("end")
+      expect(block.to_s).to eq(<<-EOM)
+  Bar.call do
+    Foo.call
+  end
+EOM
+
+      block.expand_until_next_boundry
+
+      expect(block.to_s).to eq(<<-EOM)
+
+describe "hi"
+  Bar.call do
+    Foo.call
+  end
+end
+
+EOM
     end
-
-
 
     it "expand until next boundry (empty lines)" do
       source_string = <<~EOM
