@@ -38,18 +38,6 @@ RSpec.describe DidYouDo do
 
   #describe "integration" do
   #  it "finds nested nodes" do
-  #    source = <<~EOM
-  #      describe "lol"
-  #      end
-
-  #      describe "hi" do
-  #        Foo.call
-  #        end
-  #      end
-
-  #      it "blerg" do
-  #      end
-  #    EOM
 
   #    invalid_nodes = []
   #    ParseEndZones.new(source).each do |zone|
@@ -355,7 +343,7 @@ class CodeSource
 
   def self.code_lines_to_source(source)
     source = source.select(&:visible?)
-    source = source.join($/)
+    source = source.join
   end
 
   def self.valid?(source)
@@ -419,6 +407,13 @@ class CodeSource
     max_indent_to_block if block.nil?
   end
 
+  def invalid_code
+    CodeBlock.new(
+     lines: code_lines.select(&:marked_invalid?),
+     source: self
+    )
+  end
+
   def detect_invalid
     while block = next_frontier
       if block.valid?
@@ -443,6 +438,7 @@ class CodeSource
 end
 
 RSpec.describe CodeLine do
+
 
   it "detect" do
     source = CodeSource.new(<<~EOM)
@@ -536,14 +532,6 @@ RSpec.describe CodeLine do
       block.block_with_neighbors_while {|n| n.index == 1 }.lines
     ).to eq([source.code_lines[1]])
 
-
-#   block = CodeBlock.new(
-#     source: source,
-#     lines: line
-#   ).block_with_neighbors_while do |l|
-#     l.indent == line.indent
-#   end
-
     source = CodeSource.new(<<~EOM)
       def foo
         bar; end
@@ -560,13 +548,13 @@ RSpec.describe CodeLine do
 
   it "ignores marked valid lines" do
     code_lines = []
-    code_lines << CodeLine.new(line: "def foo",            index: 0)
-    code_lines << CodeLine.new(line: "  Array(value) |x|", index: 1)
-    code_lines << CodeLine.new(line: "  end",              index: 2)
-    code_lines << CodeLine.new(line: "end",                index: 3)
+    code_lines << CodeLine.new(line: "def foo\n",            index: 0)
+    code_lines << CodeLine.new(line: "  Array(value) |x|\n", index: 1)
+    code_lines << CodeLine.new(line: "  end\n",              index: 2)
+    code_lines << CodeLine.new(line: "end\n",                index: 3)
 
     expect(CodeSource.valid?(code_lines)).to be_falsey
-    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM)
       def foo
         Array(value) |x|
         end
@@ -576,21 +564,20 @@ RSpec.describe CodeLine do
     code_lines[0].mark_invisible
     code_lines[3].mark_invisible
 
-    expected = ["  Array(value) |x|", "  end"].join($/)
+    expected = ["  Array(value) |x|\n", "  end\n"].join
     expect(CodeSource.code_lines_to_source(code_lines)).to eq(expected)
-
     expect(CodeSource.valid?(code_lines)).to be_falsey
   end
 
   it "ignores marked invalid lines" do
     code_lines = []
-    code_lines << CodeLine.new(line: "def foo",            index: 0)
-    code_lines << CodeLine.new(line: "  Array(value) |x|", index: 1)
-    code_lines << CodeLine.new(line: "  end",              index: 2)
-    code_lines << CodeLine.new(line: "end",                index: 3)
+    code_lines << CodeLine.new(line: "def foo\n",            index: 0)
+    code_lines << CodeLine.new(line: "  Array(value) |x|\n", index: 1)
+    code_lines << CodeLine.new(line: "  end\n",              index: 2)
+    code_lines << CodeLine.new(line: "end\n",                index: 3)
 
     expect(CodeSource.valid?(code_lines)).to be_falsey
-    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM)
       def foo
         Array(value) |x|
         end
@@ -600,7 +587,7 @@ RSpec.describe CodeLine do
     code_lines[1].mark_invisible
     code_lines[2].mark_invisible
 
-    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM.strip)
+    expect(CodeSource.code_lines_to_source(code_lines)).to eq(<<~EOM)
       def foo
       end
     EOM
@@ -634,5 +621,28 @@ RSpec.describe CodeLine do
         puts 'lol'
       end
     EOM
+  end
+
+
+  describe "detect cases" do
+    it "" do
+      source = <<~EOM
+        describe "hi" do
+          Foo.call
+          end
+        end
+
+        it "blerg" do
+        end
+      EOM
+
+      source = CodeSource.new(source)
+      source.detect_invalid
+
+      expect(source.code_lines[1].marked_invalid?).to be_truthy
+      expect(source.code_lines[2].marked_invalid?).to be_truthy
+
+      expect(source.invalid_code.to_s).to eq("  Foo.call\n  end\n")
+    end
   end
 end
