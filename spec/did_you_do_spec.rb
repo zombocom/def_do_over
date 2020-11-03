@@ -120,6 +120,11 @@ class CodeBlock
     @source = source
   end
 
+
+  def <=>(other)
+    self.current_indent <=> other.current_indent
+  end
+
   def visible_lines
     @lines
       .select(&:not_empty?)
@@ -207,7 +212,10 @@ class CodeBlock
   end
 
   def next_indent
-    [before_line&.indent || 0, after_line&.indent || 0].max
+    [
+      before_line&.indent || 0,
+      after_line&.indent || 0
+    ].max
   end
 
   def current_indent
@@ -347,11 +355,17 @@ class CodeSource
   # frontier or if
   def next_frontier
     if @frontier.any?
-      block = @frontier.sort(&:next_indent).pop
+      @frontier.sort!
+      block = @frontier.pop
 
-      if block.max_indent <= self.max_indent
+      if self.get_max_indent && block.current_indent <= self.get_max_indent
         @frontier.push(block)
         block = nil
+      else
+
+        block.expand_until_next_boundry
+        clean_hash(block)
+        return block
       end
     end
 
@@ -371,6 +385,20 @@ class CodeSource
     )
   end
 
+  def frontier_holds_syntax_error?
+    lines = code_lines
+    @frontier.each do |block|
+      lines -= block.lines
+    end
+
+    return true if lines.empty?
+
+    CodeBlock.new(
+      source: self,
+      lines: lines
+    ).valid?
+  end
+
   def detect_invalid
     while block = next_frontier
       if block.valid?
@@ -384,16 +412,19 @@ class CodeSource
         return
       end
 
-      block.expand_until_next_boundry
-      clean_hash(block)
-
       @frontier << block
+
+      if frontier_holds_syntax_error?
+        @frontier.each do |block|
+          block.lines.each(&:mark_invalid)
+        end
+        return
+      end
     end
   end
 end
 
 RSpec.describe CodeLine do
-
 
   it "detect" do
     source = CodeSource.new(<<~EOM)
@@ -435,6 +466,36 @@ RSpec.describe CodeLine do
     expect(block.lines).to eq(
       [source.code_lines[0], source.code_lines[2]])
   end
+
+  it "frontier levels" do
+
+    source_string = <<~EOM
+      describe "hi" do
+        Foo.call
+        end
+      end
+
+      it "blerg" do
+        Bar.call
+        end
+      end
+    EOM
+
+    source = CodeSource.new(source_string)
+
+    block = source.next_frontier
+    expect(block.to_s).to eq(<<-EOM)
+  Foo.call
+  end
+EOM
+
+    block = source.next_frontier
+    expect(block.to_s).to eq(<<-EOM)
+  Bar.call
+  end
+EOM
+  end
+
 
   it "max indent to block" do
     source = CodeSource.new(<<~EOM)
@@ -580,10 +641,6 @@ RSpec.describe CodeLine do
     EOM
   end
 
-  #      beginning: "defzfoo",
-  #      middle:    "  puts 'lol'",
-  #      ending:    "end",
-
   describe "detect cases" do
     it "finds one invalid code block with typo def" do
       source_string = <<~EOM
@@ -598,6 +655,31 @@ RSpec.describe CodeLine do
       defzfoo
       end
       EOM
+    end
+
+    it "finds TWO invalid code block with missing do at the depest indent" do
+      source = <<~EOM
+        describe "hi" do
+          Foo.call
+          end
+        end
+
+        it "blerg" do
+          Bar.call
+          end
+        end
+      EOM
+
+      source = CodeSource.new(source)
+      source.detect_invalid
+
+
+      expect(source.invalid_code.to_s).to eq(<<-EOM)
+  Foo.call
+  end
+  Bar.call
+  end
+EOM
     end
 
     it "finds one invalid code block with missing do at the depest indent" do
@@ -619,7 +701,9 @@ RSpec.describe CodeLine do
 
       expect(source.invalid_code.to_s).to eq("  Foo.call\n  end\n")
     end
+  end
 
+  describe "expansion" do
 
     it "expand until next boundry (indentation)" do
       source_string = <<~EOM
