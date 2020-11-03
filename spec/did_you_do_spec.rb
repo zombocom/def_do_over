@@ -443,14 +443,6 @@ RSpec.describe DidYouDo do
 end
 
 
-class DetectInvalid
-  def initialize
-    @source = source
-  end
-
-  def call
-  end
-end
 
 class CodeLine
   attr_reader :line, :index, :indent
@@ -465,6 +457,10 @@ class CodeLine
     @is_end = line.strip == "end".freeze
     @status = nil # valid, invalid, unknown
     @visible = true
+  end
+
+  def marked_invalid?
+    @status == :invalid
   end
 
   def mark_valid
@@ -596,39 +592,6 @@ class CodeBlock
   end
 end
 
-# if frontier.empty?
-#   line = @indent_hash[indent].pop
-#   block = CodeBlock.new(
-#     source: source,
-#     lines: line
-#   ).block_with_neighbors_while do |l|
-#     l.indent == line.indent
-#   end
-
-#   @indent_hash[indent] -= block.lines
-# else
-#   block = frontier.sort(&:max_indent).pop # Look at highest
-# end
-
-# if block.valid?
-#   # Valid lines can be ignored, keep searching
-#   block.lines.each(&:mark_invisible)
-# else
-#   if block.document_valid_without?
-#     block.lines.each(&:mark_invalid)
-
-#     # Mark invalid
-#     # return globally invalid
-#     return
-#   else
-#     next_indent = block.closest_indent
-#     frontier << block.block_with_neighbors_while do |l|
-#       l.indent = next_indent
-#     end
-#   end
-# end
-#
-
 class CodeSource
   attr_reader :lines, :indent_array, :indent_hash, :code_lines
 
@@ -651,10 +614,10 @@ class CodeSource
     end
   end
 
-  def largest_indent
+  def get_max_indent
+    @indent_hash.select! {|k, v| !v.empty?}
     @indent_hash.keys.sort.last
   end
-  alias :max_indent :largest_indent
 
   def indent_hash
     @indent_hash
@@ -682,18 +645,20 @@ class CodeSource
     $stderr = stderr if stderr
   end
 
-  def pop_max_indent_line
+  def pop_max_indent_line(indent = get_max_indent)
     return nil if @indent_hash.empty?
 
-    if (line = @indent_hash[max_indent].shift)
+    if (line = @indent_hash[indent].shift)
       return line
     else
-      @indent_hash.delete(max_indent)
       pop_max_indent_line
     end
   end
 
+  # Returns a CodeBlock based on the maximum indentation
+  # present in the source
   def max_indent_to_block
+    max_indent = get_max_indent
     if (line = pop_max_indent_line)
       block = CodeBlock.new(
         source: self,
@@ -701,6 +666,7 @@ class CodeSource
       ).block_with_neighbors_while do |line|
         line.indent == max_indent
       end
+
       block.lines.each do |line|
         @indent_hash[line.indent].delete(line)
       end
@@ -708,61 +674,87 @@ class CodeSource
     end
   end
 
-# def next_frontier
-  #   return @frontier.sort(&:max_indent).pop if @frontier.any?
+  # Returns the highest indentation code block from the
+  # frontier or if
+  def next_frontier
+    if @frontier.any?
+      block = @frontier.sort(&:max_indent).pop
 
-  #   indent = self.largest_indent
-  #   if (line = @indent_hash[indent].pop)
-  #     block = CodeBlock.new(
-  #       source: source,
-  #       lines: line
-  #     ).block_with_neighbors_while do |l|
-  #       l.indent == line.indent
-  #     end
+      if block.max_indent <= self.max_indent
+        @frontier.push(block)
+        block = nil
+      end
+    end
 
-  #     @indent_hash[indent] -= block.lines
-  #     @indent_hash.delete(indent) if @indent_hash[indent].empty?
-  #   end
-  # end
+    max_indent_to_block if block.nil?
+  end
 
-  # def detect_invalid
-  #   while block = next_frontier
-  #     if frontier.empty?
-  #       line = @indent_hash[indent].pop
-  #       block = CodeBlock.new(
-  #         source: source,
-  #         lines: line
-  #       ).block_with_neighbors_while do |l|
-  #         l.indent == line.indent
-  #       end
+  def detect_invalid
+    while block = next_frontier
+      if block.valid?
+        block.lines.each(&:mark_valid)
+        block.lines.each(&:mark_invisible)
+        next
+      end
 
-  #       @indent_hash[indent] -= block.lines
-  #     else
-  #       block = frontier.sort(&:max_indent).pop # Look at highest
-  #     end
+      if block.document_valid_without?
+        block.lines.each(&:mark_invalid)
+        return
+      end
 
-  #     if block.valid?
-  #       # Valid lines can be ignored, keep searching
-  #       block.lines.each(&:mark_invisible)
-  #     else
-  #       if block.document_valid_without?
-  #         block.lines.each(&:mark_invalid)
-
-  #         # Mark invalid
-  #         # return globally invalid
-  #         return
-  #       else
-  #         next_indent = block.closest_inden
-  #         frontier << block.block_with_neighbors_while do |l|
-  #           l.indent = next_indent
-  #         end
-  #       end
-  #     end
-  #   end
-  # end
+      before_indent = before_line.indent
+      after_indent = after_line.indent
+      indent = [before_indent, after_indent].max
+      @frontier << block.block_with_neighbors_while do |line|
+        line.indent == indent
+      end
+    end
+  end
 end
 
 RSpec.describe CodeLine do
+
+  it "detect" do
+    source = CodeSource.new(<<~EOM)
+      def foo
+        puts 'lol'
+      end
+    EOM
+    source.detect_invalid
+    expect(source.code_lines.map(&:marked_invalid?)).to eq([false, false, false])
+
+    source = CodeSource.new(<<~EOM)
+      def foo
+        end
+      end
+    EOM
+    source.detect_invalid
+    expect(source.code_lines.map(&:marked_invalid?)).to eq([false, true, false])
+
+    source = CodeSource.new(<<~EOM)
+      def foo
+        def blerg
+      end
+    EOM
+    source.detect_invalid
+    expect(source.code_lines.map(&:marked_invalid?)).to eq([false, true, false])
+  end
+  it "frontier" do
+    source = CodeSource.new(<<~EOM)
+      def foo
+        puts 'lol'
+      end
+    EOM
+    block = source.next_frontier
+    expect(block.lines).to eq([source.code_lines[1]])
+
+    source.code_lines[1].mark_invisible
+
+    block = source.next_frontier
+    expect(block.lines).to eq(
+      [source.code_lines[0], source.code_lines[2]])
+  end
+
   it "max indent to block" do
     source = CodeSource.new(<<~EOM)
       def foo
@@ -770,6 +762,7 @@ RSpec.describe CodeLine do
       end
     EOM
     block = source.max_indent_to_block
+
     expect(block.lines).to eq([source.code_lines[1]])
 
     block = source.max_indent_to_block
